@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:intl/date_symbol_data_local.dart';
 
+import 'core.dart';
+import 'notify.dart';
 import 'screens_a.dart';
 import 'screens_b.dart';
 import 'ui.dart';
@@ -41,6 +43,23 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> {
   int index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    dataVersion.addListener(_resync);
+    _resync();
+  }
+
+  @override
+  void dispose() {
+    dataVersion.removeListener(_resync);
+    super.dispose();
+  }
+
+  void _resync() {
+    Notifier.sync();
+  }
 
   @override
   Widget build(BuildContext context) {

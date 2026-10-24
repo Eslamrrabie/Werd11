@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'core.dart';
 import 'screens_b.dart';
+import 'screens_c.dart';
 import 'ui.dart';
 
 // ═════════════════════════ الرئيسية ═════════════════════════
@@ -137,7 +138,7 @@ class _HomePageState extends State<HomePage> {
                         icon: const Icon(Icons.fact_check),
                         label: const Text('تسجيل الحضور')),
                     FilledButton.icon(
-                        onPressed: () => push(context, const RecitationFormPage()),
+                        onPressed: () => push(context, const SessionFormPage()),
                         icon: const Icon(Icons.record_voice_over),
                         label: const Text('تسجيل تسميع')),
                     FilledButton.tonalIcon(
@@ -244,6 +245,26 @@ class _AttendancePageState extends State<AttendancePage> {
     if (mounted) toast(context, n == 0 ? 'كل الطلاب مسجَّلون بالفعل' : 'تم تسجيل $n طالب حاضراً');
   }
 
+  Future<void> markRestAbsent() async {
+    final rest = rows.where((x) => att[iv((x['student'] as M)['id'])] == null).toList();
+    if (rest.isEmpty) {
+      toast(context, 'لا يوجد طلاب بدون تسجيل');
+      return;
+    }
+    final ok = await confirmDialog(
+      context,
+      'تسجيل الباقي غائبين',
+      'سيُسجَّل ${rest.length} طالب (غير المسجَّلين) كـ«غائب» في ${arDate(date)}. يمكنك تعديل أي واحد بعدها.',
+      ok: 'تسجيلهم غائبين',
+    );
+    if (!ok) return;
+    for (final x in rest) {
+      await Repo.setAttendance(iv((x['student'] as M)['id']), iso(date), sv(x['time']), 'غائب');
+    }
+    bump();
+    if (mounted) toast(context, 'تم تسجيل ${rest.length} غائباً');
+  }
+
   Future<void> editNote(M record) async {
     final c = TextEditingController(text: sv(record['notes']));
     final ok = await showDialog<bool>(
@@ -289,14 +310,15 @@ class _AttendancePageState extends State<AttendancePage> {
             width: double.infinity,
             color: const Color(0xFFF1EBD6),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            child: Row(children: [
-              Expanded(
-                child: Text(
-                  'حاضر ${counts['حاضر'] ?? 0} • متأخر ${counts['متأخر'] ?? 0} • غائب ${counts['غائب'] ?? 0} • اعتذار ${counts['اعتذار'] ?? 0} • لم يُسجَّل $unrecorded',
-                  style: const TextStyle(fontSize: 12.5),
-                ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                'حاضر ${counts['حاضر'] ?? 0} • متأخر ${counts['متأخر'] ?? 0} • غائب ${counts['غائب'] ?? 0} • اعتذار ${counts['اعتذار'] ?? 0} • لم يُسجَّل $unrecorded',
+                style: const TextStyle(fontSize: 12.5),
               ),
-              TextButton(onPressed: markAllPresent, child: const Text('الكل حاضر')),
+              Row(children: [
+                TextButton(onPressed: markAllPresent, child: const Text('الكل حاضر')),
+                TextButton(onPressed: markRestAbsent, child: const Text('الباقي غائب')),
+              ]),
             ]),
           ),
         Expanded(
@@ -829,10 +851,71 @@ class _StudentProfilePageState extends State<StudentProfilePage> {
       lastNew = firstWhereOrNull((x) => sv(x['recitation_type']) == 'حفظ جديد', rec);
       lastRevision = firstWhereOrNull((x) => sv(x['recitation_type']) == 'مراجعة', rec);
       lastAny = r.isEmpty ? null : r.first;
-      planned = firstWhereOrNull((x) => sv(x['next_assignment']).isNotEmpty, r);
+      planned = firstWhereOrNull((x) => assignText(x).isNotEmpty, r);
       pendingRev = pend;
       loading = false;
     });
+  }
+
+  Future<void> shareReport() async {
+    final st = s!;
+    final pct = attPct(counts);
+    final b = StringBuffer()
+      ..writeln('السلام عليكم ورحمة الله وبركاته')
+      ..writeln('تقرير الطالب/ة: ${sv(st['full_name'])}')
+      ..writeln(arDate(DateTime.now()))
+      ..writeln()
+      ..writeln('موضع الحفظ الحالي: ${posText(st['pos_surah'], st['pos_verse'])}');
+    if (recs.isNotEmpty) {
+      b.writeln('آخر التسميعات:');
+      for (final x in recs.take(3)) {
+        b.writeln('• ${recLine(x)} — ${sv(x['rating'])}');
+      }
+    }
+    b
+      ..writeln()
+      ..writeln(
+          'الحضور: ${pct == null ? 'لا جلسات بعد' : '${pct.round()}٪'} (حاضر ${counts['حاضر'] ?? 0}، متأخر ${counts['متأخر'] ?? 0}، غياب بعذر ${counts['اعتذار'] ?? 0}، بدون عذر ${counts['غائب'] ?? 0})');
+    if (lastAny != null && sv(lastAny!['notes']).isNotEmpty) {
+      b.writeln('ملاحظة المعلّم: ${sv(lastAny!['notes'])}');
+    }
+    if (planned != null) b.writeln('التكليف القادم: ${assignText(planned!)}');
+    b
+      ..writeln()
+      ..write('جزاكم الله خيراً');
+    final phone = sv(st['guardian_phone']).isNotEmpty ? sv(st['guardian_phone']) : sv(st['phone']);
+    await openWhatsApp(context, phone, b.toString());
+  }
+
+  Future<void> remindParent() async {
+    final st = s!;
+    final now = DateTime.now();
+    DateTime? when;
+    String time = '';
+    for (var i = 0; i < 8 && when == null; i++) {
+      final day = DateTime(now.year, now.month, now.day + i);
+      for (final x in await Repo.scheduledOn(day)) {
+        if (iv((x['student'] as M)['id']) != widget.id) continue;
+        time = sv(x['time']);
+        final p = time.split(':');
+        final dt = DateTime(day.year, day.month, day.day, int.tryParse(p[0]) ?? 0,
+            p.length > 1 ? int.tryParse(p[1]) ?? 0 : 0);
+        if (dt.isAfter(now)) when = dt;
+        break;
+      }
+    }
+    if (!mounted) return;
+    if (when == null) {
+      toast(context, 'لا توجد حلقة قادمة مجدولة لهذا الطالب خلال الأسبوع');
+      return;
+    }
+    final isToday = iso(when) == iso(now);
+    final dayName = isToday ? 'اليوم' : 'يوم ${weekdayNames[when.weekday]}';
+    final msg = 'السلام عليكم ورحمة الله وبركاته\n'
+        'تذكير بحلقة ${sv(st['full_name'])} $dayName الساعة $time.\n'
+        'جزاكم الله خيراً';
+    final phone = sv(st['guardian_phone']).isNotEmpty ? sv(st['guardian_phone']) : sv(st['phone']);
+    await openWhatsApp(context, phone, msg);
   }
 
   String recLine(M x) =>
@@ -868,6 +951,15 @@ class _StudentProfilePageState extends State<StudentProfilePage> {
         appBar: AppBar(
           title: Text(sv(st['full_name'])),
           actions: [
+            PopupMenuButton<String>(
+              tooltip: 'واتساب',
+              icon: const Icon(Icons.share),
+              onSelected: (v) => v == 'report' ? shareReport() : remindParent(),
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'report', child: Text('إرسال تقرير لولي الأمر (واتساب)')),
+                PopupMenuItem(value: 'remind', child: Text('تذكير ولي الأمر بالحلقة القادمة')),
+              ],
+            ),
             IconButton(
               icon: const Icon(Icons.edit),
               tooltip: 'تعديل',
@@ -887,7 +979,7 @@ class _StudentProfilePageState extends State<StudentProfilePage> {
           ),
         ),
         floatingActionButton: FloatingActionButton.extended(
-          onPressed: () => push(context, RecitationFormPage(studentId: widget.id)),
+          onPressed: () => push(context, SessionFormPage(studentId: widget.id)),
           icon: const Icon(Icons.record_voice_over),
           label: const Text('تسميع'),
         ),
@@ -949,7 +1041,7 @@ class _StudentProfilePageState extends State<StudentProfilePage> {
         child: planned == null
             ? const Text('لا يوجد تكليف مخطَّط', style: TextStyle(color: Colors.black54))
             : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(sv(planned!['next_assignment'])),
+                for (final line in assignText(planned!).split(' • ')) Text(line),
                 if (sv(planned!['next_session_date']).isNotEmpty)
                   Text('الموعد: ${arDateShort(sv(planned!['next_session_date']))}',
                       style: const TextStyle(color: Colors.black54, fontSize: 12.5)),
@@ -973,7 +1065,7 @@ class _StudentProfilePageState extends State<StudentProfilePage> {
         const AppCard(child: Text('لا توجد مراجعات معلّقة', style: TextStyle(color: Colors.black54))),
       for (final x in pendingRev)
         AppCard(
-          onTap: () => push(context, RecitationFormPage(id: iv(x['id']))),
+          onTap: () => push(context, RecitationEditPage(id: iv(x['id']))),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(recLine(x), style: const TextStyle(fontWeight: FontWeight.w600)),
             if (sv(x['mistakes']).isNotEmpty) Text('الأخطاء: ${sv(x['mistakes'])}'),

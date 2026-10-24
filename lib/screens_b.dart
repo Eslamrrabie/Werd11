@@ -4,7 +4,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import 'core.dart';
+import 'notify.dart';
 import 'screens_a.dart';
+import 'screens_c.dart';
 import 'ui.dart';
 
 // ═════════════════════════ عنصر سجل تسميع ═════════════════════════
@@ -12,7 +14,7 @@ Widget recTile(BuildContext context, M x, {bool showName = true}) {
   final rating = sv(x['rating']);
   final verses = iv(x['start_verse']) > 0 ? '${iv(x['start_verse'])}–${iv(x['end_verse'])}' : '';
   return AppCard(
-    onTap: () => push(context, RecitationFormPage(id: iv(x['id']))),
+    onTap: () => push(context, RecitationEditPage(id: iv(x['id']))),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         Expanded(
@@ -29,8 +31,8 @@ Widget recTile(BuildContext context, M x, {bool showName = true}) {
         Text('الأخطاء: ${sv(x['mistakes'])}', style: const TextStyle(fontSize: 12.5, color: Colors.black54)),
       if (sv(x['notes']).isNotEmpty)
         Text(sv(x['notes']), style: const TextStyle(fontSize: 12.5, color: Colors.black54)),
-      if (sv(x['next_assignment']).isNotEmpty)
-        Text('التكليف القادم: ${sv(x['next_assignment'])}',
+      if (assignText(x).isNotEmpty)
+        Text('التكليف القادم: ${assignText(x)}',
             style: const TextStyle(fontSize: 12.5, color: emerald)),
     ]),
   );
@@ -88,7 +90,7 @@ class _RecitationPageState extends State<RecitationPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('التسميع')),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => push(context, RecitationFormPage(date: date)),
+        onPressed: () => push(context, SessionFormPage(date: date)),
         icon: const Icon(Icons.add),
         label: const Text('تسجيل تسميع'),
       ),
@@ -117,7 +119,7 @@ class _RecitationPageState extends State<RecitationPage> {
                             avatar: const Icon(Icons.add, size: 16),
                             label: Text(sv(s['full_name'])),
                             onPressed: () =>
-                                push(context, RecitationFormPage(studentId: iv(s['id']), date: date)),
+                                push(context, SessionFormPage(studentId: iv(s['id']), date: date)),
                           ),
                       ]),
                     ),
@@ -132,330 +134,6 @@ class _RecitationPageState extends State<RecitationPage> {
                 ]),
         ),
       ]),
-    );
-  }
-}
-
-// ═════════════════════════ نموذج التسميع ═════════════════════════
-class RecitationFormPage extends StatefulWidget {
-  final int? id;
-  final int? studentId;
-  final DateTime? date;
-  const RecitationFormPage({super.key, this.id, this.studentId, this.date});
-  @override
-  State<RecitationFormPage> createState() => _RecitationFormPageState();
-}
-
-class _RecitationFormPageState extends State<RecitationFormPage> {
-  final form = GlobalKey<FormState>();
-  final startC = TextEditingController();
-  final endC = TextEditingController();
-  final mistakesC = TextEditingController();
-  final notesC = TextEditingController();
-  final nextC = TextEditingController();
-  List<M> students = [];
-  int? studentId;
-  DateTime date = DateTime.now();
-  DateTime? nextDate;
-  String type = recTypes[0];
-  String rating = ratings[1];
-  String? surah;
-  bool updatePos = true;
-  int editCount = 0;
-  bool loading = true;
-  bool saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    init();
-  }
-
-  @override
-  void dispose() {
-    for (final c in [startC, endC, mistakesC, notesC, nextC]) {
-      c.dispose();
-    }
-    super.dispose();
-  }
-
-  Future<void> init() async {
-    date = widget.date ?? DateTime.now();
-    studentId = widget.studentId;
-    var list = await Repo.students(status: 'active');
-    if (widget.id != null) {
-      final r = await Repo.recitation(widget.id!);
-      if (r != null) {
-        studentId = iv(r['student_id']);
-        date = parseIso(sv(r['recitation_date']));
-        type = sv(r['recitation_type']);
-        rating = sv(r['rating']);
-        surah = sv(r['surah_name']).isEmpty ? null : sv(r['surah_name']);
-        startC.text = iv(r['start_verse']) > 0 ? '${iv(r['start_verse'])}' : '';
-        endC.text = iv(r['end_verse']) > 0 ? '${iv(r['end_verse'])}' : '';
-        mistakesC.text = sv(r['mistakes']);
-        notesC.text = sv(r['notes']);
-        nextC.text = sv(r['next_assignment']);
-        nextDate = sv(r['next_session_date']).isEmpty ? null : parseIso(sv(r['next_session_date']));
-        updatePos = false; // عند التعديل لا يتغير موضع الحفظ إلا بتأكيدك
-        editCount = (await Repo.recitationHistory(widget.id!)).length;
-      }
-    }
-    if (studentId != null && !list.any((s) => iv(s['id']) == studentId)) {
-      final s = await Repo.student(studentId!);
-      if (s != null) list = [...list, s];
-    }
-    students = list;
-    if (mounted) setState(() => loading = false);
-  }
-
-  Future<void> onStudentChanged(int? v) async {
-    setState(() => studentId = v);
-    // تسهيل فقط: اقتراح السورة التالية من موضع الحفظ الفعلي. لا يغيّر شيئاً حتى تحفظ.
-    if (v != null && widget.id == null && type == 'حفظ جديد' && surah == null) {
-      final s = await Repo.student(v);
-      if (s != null && s['pos_surah'] != null && mounted) {
-        final si = iv(s['pos_surah']);
-        final pv = iv(s['pos_verse']);
-        setState(() {
-          if (pv < surahs[si - 1].$2) {
-            surah = surahs[si - 1].$1;
-            startC.text = '${pv + 1}';
-          } else if (si < 114) {
-            surah = surahs[si].$1;
-            startC.text = '1';
-          }
-        });
-      }
-    }
-  }
-
-  bool get notRecited => rating == kNotRecited;
-  bool get canUpdatePos => type == 'حفظ جديد' && !notRecited;
-
-  Future<void> save() async {
-    if (studentId == null) {
-      toast(context, 'اختر الطالب');
-      return;
-    }
-    if (!form.currentState!.validate()) return;
-    setState(() => saving = true);
-    try {
-      final sNum = int.tryParse(startC.text.trim());
-      final eNum = int.tryParse(endC.text.trim());
-      await Repo.saveRecitation({
-        'student_id': studentId,
-        'recitation_date': iso(date),
-        'recitation_type': type,
-        'surah_name': surah ?? '',
-        'start_verse': sNum,
-        'end_verse': eNum,
-        'rating': rating,
-        'mistakes': mistakesC.text.trim(),
-        'notes': notesC.text.trim(),
-        'next_assignment': nextC.text.trim(),
-        'next_session_date': nextDate == null ? '' : iso(nextDate!),
-      }, id: widget.id, updatePosition: updatePos && canUpdatePos);
-      bump();
-      if (!mounted) return;
-      toast(context, widget.id == null ? 'تم حفظ التسميع' : 'تم حفظ التعديل (والنسخة السابقة محفوظة)');
-      Navigator.pop(context);
-    } catch (e) {
-      if (mounted) {
-        setState(() => saving = false);
-        toast(context, 'تعذّر الحفظ: $e');
-      }
-    }
-  }
-
-  Future<void> delete() async {
-    final ok = await confirmDialog(context, 'حذف السجل',
-        'سيُحذف سجل التسميع هذا نهائياً مع سجل تعديلاته. لن يتغير موضع حفظ الطالب.',
-        ok: 'حذف', danger: true);
-    if (!ok) return;
-    await Repo.deleteRecitation(widget.id!);
-    bump();
-    if (mounted) {
-      toast(context, 'تم الحذف');
-      Navigator.pop(context);
-    }
-  }
-
-  Future<void> showHistory() async {
-    final h = await Repo.recitationHistory(widget.id!);
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('النسخ السابقة لهذا السجل'),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: ListView(shrinkWrap: true, children: [
-            for (final x in h)
-              Builder(builder: (_) {
-                final o = jsonDecode(sv(x['snapshot'])) as Map<String, dynamic>;
-                return ListTile(
-                  dense: true,
-                  title: Text('${o['recitation_type']} • ${o['surah_name']} ${o['start_verse'] ?? ''}–${o['end_verse'] ?? ''} • ${o['rating']}'),
-                  subtitle: Text('عُدّل في ${sv(x['edited_at']).split('T').first}'
-                      '${sv(o['notes']).isEmpty ? '' : '\n${o['notes']}'}'),
-                );
-              }),
-          ]),
-        ),
-        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق'))],
-      ),
-    );
-  }
-
-  String? verseValidator(String? v, {required bool start}) {
-    if (notRecited && (v ?? '').trim().isEmpty) return null;
-    final n = int.tryParse((v ?? '').trim());
-    if (surah == null) return null;
-    final max = surahs[surahIndex(surah!) - 1].$2;
-    if (n == null || n < 1 || n > max) return '1 - $max';
-    if (!start) {
-      final s = int.tryParse(startC.text.trim());
-      if (s != null && n < s) return 'أقل من البداية';
-    }
-    return null;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.id == null ? 'تسجيل تسميع' : 'تعديل التسميع'),
-        actions: [
-          if (widget.id != null)
-            IconButton(icon: const Icon(Icons.delete_outline), tooltip: 'حذف', onPressed: delete),
-        ],
-      ),
-      body: loading
-          ? const Center(child: CircularProgressIndicator())
-          : students.isEmpty
-              ? const EmptyState(Icons.person_off, 'أضف طالباً أولاً من قسم «الطلاب»')
-              : Form(
-                  key: form,
-                  child: ListView(padding: const EdgeInsets.all(14), children: [
-                    DropdownButtonFormField<int>(
-                      value: studentId,
-                      isExpanded: true,
-                      decoration: const InputDecoration(labelText: 'الطالب *'),
-                      items: [
-                        for (final s in students)
-                          DropdownMenuItem(value: iv(s['id']), child: Text(sv(s['full_name']))),
-                      ],
-                      onChanged: onStudentChanged,
-                    ),
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.event),
-                      label: Text('التاريخ: ${arDate(date)}'),
-                      onPressed: () async {
-                        final d = await pickDate(context, date);
-                        if (d != null) setState(() => date = d);
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      value: type,
-                      decoration: const InputDecoration(labelText: 'نوع التسميع'),
-                      items: [for (final t in recTypes) DropdownMenuItem(value: t, child: Text(t))],
-                      onChanged: (v) => setState(() => type = v ?? type),
-                    ),
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      value: surah,
-                      isExpanded: true,
-                      decoration: InputDecoration(labelText: notRecited ? 'السورة' : 'السورة *'),
-                      items: [for (var i = 0; i < 114; i++) DropdownMenuItem(value: surahs[i].$1, child: Text('${i + 1}. ${surahs[i].$1}'))],
-                      validator: (v) => (v == null && !notRecited) ? 'اختر السورة' : null,
-                      onChanged: (v) => setState(() => surah = v),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(children: [
-                      Expanded(
-                        child: TextFormField(
-                          controller: startC,
-                          decoration: const InputDecoration(labelText: 'من آية'),
-                          keyboardType: TextInputType.number,
-                          validator: (v) => verseValidator(v, start: true),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: TextFormField(
-                          controller: endC,
-                          decoration: const InputDecoration(labelText: 'إلى آية'),
-                          keyboardType: TextInputType.number,
-                          validator: (v) => verseValidator(v, start: false),
-                        ),
-                      ),
-                    ]),
-                    const SectionTitle('التقييم'),
-                    Wrap(spacing: 6, children: [
-                      for (final r in ratings)
-                        ChoiceChip(
-                          label: Text(r),
-                          selected: rating == r,
-                          selectedColor: ratingColor(r).withOpacity(.22),
-                          onSelected: (_) => setState(() => rating = r),
-                        ),
-                    ]),
-                    const SizedBox(height: 12),
-                    TextFormField(
-                      controller: mistakesC,
-                      decoration: const InputDecoration(labelText: 'الأخطاء (عدد أو وصف)'),
-                    ),
-                    const SizedBox(height: 12),
-                    TextFormField(
-                      controller: notesC,
-                      decoration: const InputDecoration(labelText: 'ملاحظات المعلّم'),
-                      maxLines: 3,
-                    ),
-                    const SectionTitle('التكليف القادم (مخطَّط فقط)'),
-                    TextFormField(
-                      controller: nextC,
-                      decoration: const InputDecoration(labelText: 'التكليف القادم'),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          icon: const Icon(Icons.event_available),
-                          label: Text(nextDate == null ? 'موعد الجلسة القادمة' : arDate(nextDate!)),
-                          onPressed: () async {
-                            final d = await pickDate(context, nextDate ?? date);
-                            if (d != null) setState(() => nextDate = d);
-                          },
-                        ),
-                      ),
-                      if (nextDate != null)
-                        IconButton(icon: const Icon(Icons.clear), onPressed: () => setState(() => nextDate = null)),
-                    ]),
-                    if (canUpdatePos)
-                      CheckboxListTile(
-                        contentPadding: EdgeInsets.zero,
-                        value: updatePos,
-                        onChanged: (v) => setState(() => updatePos = v ?? false),
-                        title: const Text('أؤكد أن الطالب سمّع فعلاً — حدّث موضع حفظه'),
-                        subtitle: const Text('يُحدَّث موضع الحفظ إلى نهاية هذا التسميع فقط عند تأكيدك'),
-                      ),
-                    if (widget.id != null && editCount > 0)
-                      TextButton.icon(
-                        onPressed: showHistory,
-                        icon: const Icon(Icons.history),
-                        label: Text('عُدّل هذا السجل $editCount مرة — عرض النسخ السابقة'),
-                      ),
-                    const SizedBox(height: 16),
-                    FilledButton.icon(
-                      onPressed: saving ? null : save,
-                      icon: const Icon(Icons.save),
-                      label: const Text('حفظ'),
-                    ),
-                  ]),
-                ),
     );
   }
 }
@@ -1050,6 +728,8 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   Map<String, int> totals = {};
   bool busy = false;
+  bool notifyOn = false;
+  int notifyMin = 15;
 
   @override
   void initState() {
@@ -1059,7 +739,35 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> refresh() async {
     final t = await Repo.totals();
-    if (mounted) setState(() => totals = t);
+    final on = await Repo.setting('notify_enabled') == '1';
+    final mins = int.tryParse(await Repo.setting('notify_minutes') ?? '') ?? 15;
+    if (mounted) {
+      setState(() {
+        totals = t;
+        notifyOn = on;
+        notifyMin = mins;
+      });
+    }
+  }
+
+  Future<void> toggleNotify(bool v) async {
+    if (v) {
+      final ok = await Notifier.requestPermission();
+      if (!ok) {
+        if (mounted) toast(context, 'لم يُسمح بالإشعارات. فعّلها للتطبيق من إعدادات الهاتف');
+        return;
+      }
+    }
+    await Repo.setSetting('notify_enabled', v ? '1' : '0');
+    setState(() => notifyOn = v);
+    bump();
+    if (mounted) toast(context, v ? 'تم تفعيل التنبيه قبل الحلقات' : 'تم إيقاف التنبيهات');
+  }
+
+  Future<void> setMinutes(int m) async {
+    await Repo.setSetting('notify_minutes', '$m');
+    setState(() => notifyMin = m);
+    bump();
   }
 
   Future<void> export() async {
@@ -1116,6 +824,42 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('الإعدادات')),
       body: ListView(padding: const EdgeInsets.only(top: 8, bottom: 24), children: [
+        const SectionTitle('التنبيهات'),
+        AppCard(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('تنبيه قبل موعد الحلقة'),
+              subtitle: const Text('يعمل بدون إنترنت حسب جداول الحلقات والطلاب'),
+              value: notifyOn,
+              onChanged: toggleNotify,
+            ),
+            Row(children: [
+              const Text('قبل الحلقة بـ '),
+              DropdownButton<int>(
+                value: const [5, 10, 15, 30, 60].contains(notifyMin) ? notifyMin : 15,
+                items: [for (final m in const [5, 10, 15, 30, 60]) DropdownMenuItem(value: m, child: Text('$m دقيقة'))],
+                onChanged: notifyOn ? (v) => setMinutes(v ?? 15) : null,
+              ),
+              const Spacer(),
+              TextButton(
+                onPressed: () async {
+                  final ok = await Notifier.requestPermission();
+                  if (!ok) {
+                    if (mounted) toast(context, 'فعّل الإشعارات للتطبيق من إعدادات الهاتف أولاً');
+                    return;
+                  }
+                  await Notifier.test();
+                },
+                child: const Text('تجربة التنبيه'),
+              ),
+            ]),
+            const Text(
+              'ملاحظة: افتح التطبيق مرة كل أسبوعين على الأقل ليتجدد جدول التنبيهات (يُجدول ١٤ يوماً قادماً).',
+              style: TextStyle(color: Colors.black54, fontSize: 12.5),
+            ),
+          ]),
+        ),
         const SectionTitle('النسخ الاحتياطي والاستعادة'),
         AppCard(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

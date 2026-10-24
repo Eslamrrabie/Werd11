@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'core.dart';
 
@@ -281,5 +282,25 @@ class _ScheduleEditorState extends State<ScheduleEditor> {
         ),
       ]),
     ]);
+  }
+}
+
+/// يحوّل الرقم لصيغة دولية لواتساب. الرقم الذي يبدأ بـ 0 يُعامل كرقم مصري (+20).
+String waNumber(String raw) {
+  var n = raw.replaceAllMapped(RegExp('[٠-٩]'), (m) => '${m[0]!.codeUnitAt(0) - 0x0660}');
+  n = n.replaceAll(RegExp(r'[^0-9]'), '');
+  if (n.startsWith('00')) return n.substring(2);
+  if (n.startsWith('0')) return '20${n.substring(1)}';
+  return n;
+}
+
+Future<void> openWhatsApp(BuildContext c, String phone, String text) async {
+  final n = waNumber(phone);
+  final uri = Uri.parse('https://wa.me/$n?text=${Uri.encodeComponent(text)}');
+  try {
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && c.mounted) toast(c, 'تعذّر فتح واتساب. تأكد أنه مثبّت على الهاتف');
+  } catch (_) {
+    if (c.mounted) toast(c, 'تعذّر فتح واتساب. تأكد أنه مثبّت على الهاتف');
   }
 }

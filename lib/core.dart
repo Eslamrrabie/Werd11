@@ -98,6 +98,24 @@ String posText(Object? surah, Object? verse) {
   return '${surahs[s - 1].$1} - آية ${iv(verse)}';
 }
 
+String _rng(Object? surah, Object? from, Object? to) {
+  final s = sv(surah);
+  final f = iv(from), e = iv(to);
+  return (f > 0 && e > 0) ? '$s $f–$e' : s;
+}
+
+/// نص التكليف المخطَّط (حفظ جديد + مراجعة) من سجل تسميع.
+String assignText(M r) {
+  final p = <String>[];
+  if (sv(r['next_new_surah']).isNotEmpty) {
+    p.add('حفظ جديد: ${_rng(r['next_new_surah'], r['next_new_from'], r['next_new_to'])}');
+  }
+  if (sv(r['next_rev_surah']).isNotEmpty) {
+    p.add('مراجعة: ${_rng(r['next_rev_surah'], r['next_rev_from'], r['next_rev_to'])}');
+  }
+  return p.isEmpty ? sv(r['next_assignment']) : p.join(' • ');
+}
+
 /// نسبة الحضور = (حاضر + متأخر) ÷ (إجمالي الجلسات − الاعتذارات). null عند عدم وجود جلسات.
 double? attPct(Map<String, int> c) {
   final total = c.values.fold<int>(0, (a, b) => a + b);
@@ -110,7 +128,7 @@ double? attPct(Map<String, int> c) {
 class AppDb {
   static Database? _db;
   static const fileName = 'werd.db';
-  static const version = 1;
+  static const version = 3;
 
   static Future<String> path() async => p.join(await getDatabasesPath(), fileName);
 
@@ -126,7 +144,24 @@ class AppDb {
           await d.execute(s);
         }
       },
-      // عند التحديثات المستقبلية: أضف هنا ALTER TABLE فقط، ولا تحذف أي بيانات.
+      onUpgrade: (d, oldV, newV) async {
+        // ترقيات آمنة: إضافة فقط، ولا حذف لأي بيانات.
+        if (oldV < 2) {
+          await d.execute('CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT)');
+        }
+        if (oldV < 3) {
+          for (final c in [
+            'next_new_surah TEXT',
+            'next_new_from INTEGER',
+            'next_new_to INTEGER',
+            'next_rev_surah TEXT',
+            'next_rev_from INTEGER',
+            'next_rev_to INTEGER',
+          ]) {
+            await d.execute('ALTER TABLE recitations ADD COLUMN $c');
+          }
+        }
+      },
     );
   }
 
@@ -187,6 +222,12 @@ class AppDb {
       notes TEXT,
       next_assignment TEXT,
       next_session_date TEXT,
+      next_new_surah TEXT,
+      next_new_from INTEGER,
+      next_new_to INTEGER,
+      next_rev_surah TEXT,
+      next_rev_from INTEGER,
+      next_rev_to INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL)''',
     '''CREATE TABLE recitation_history(
@@ -194,6 +235,7 @@ class AppDb {
       recitation_id INTEGER NOT NULL REFERENCES recitations(id) ON DELETE CASCADE,
       snapshot TEXT NOT NULL,
       edited_at TEXT NOT NULL)''',
+    'CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT)',
     'CREATE INDEX idx_att_date ON attendance(session_date)',
     'CREATE INDEX idx_rec_student ON recitations(student_id, recitation_date)',
     'CREATE INDEX idx_sched_weekday ON schedules(weekday)',
@@ -205,6 +247,17 @@ class AppDb {
 class Repo {
   static Future<Database> get _d => AppDb.db;
   static String _now() => DateTime.now().toIso8601String();
+
+  // الإعدادات
+  static Future<String?> setting(String k) async {
+    final r = await (await _d).query('app_settings', where: 'key = ?', whereArgs: [k]);
+    return r.isEmpty ? null : sv(r.first['value']);
+  }
+
+  static Future<void> setSetting(String k, String v) async {
+    await (await _d).insert('app_settings', {'key': k, 'value': v},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
 
   // الطلاب
   static Future<List<M>> students({String q = '', String? status}) async {
@@ -499,6 +552,58 @@ class Repo {
       }
       return rid;
     });
+  }
+
+  /// يحفظ جلسة تسميع من عدة أجزاء في معاملة واحدة، ويحدّث موضع الحفظ فقط إذا مُرِّر بتأكيد المعلّم.
+  static Future<void> saveSession(List<M> rows,
+      {int? studentId, String? posSurah, int? posVerse}) async {
+    final d = await _d;
+    final t = _now();
+    await d.transaction((txn) async {
+      for (final r in rows) {
+        await txn.insert('recitations', {...r, 'created_at': t, 'updated_at': t});
+      }
+      if (studentId != null && posSurah != null && posVerse != null) {
+        final si = surahIndex(posSurah);
+        if (si > 0 && posVerse > 0) {
+          await txn.update(
+              'students',
+              {
+                'pos_surah': si,
+                'pos_verse': posVerse,
+                'memorization_position': posText(si, posVerse),
+                'updated_at': t,
+              },
+              where: 'id = ?',
+              whereArgs: [studentId]);
+        }
+      }
+    });
+  }
+
+  static Future<M?> lastAssignment(int sid) async {
+    final r = await (await _d).query('recitations',
+        where: "student_id = ? AND (COALESCE(next_new_surah,'') <> '' OR COALESCE(next_rev_surah,'') <> '')",
+        whereArgs: [sid],
+        orderBy: 'recitation_date DESC, id DESC',
+        limit: 1);
+    return r.isEmpty ? null : r.first;
+  }
+
+  /// مقاطع الحفظ الجديد التي سمّعها الطالب فعلاً (للاختيار منها عند المراجعة).
+  static Future<List<M>> memorizedRanges(int sid) async {
+    final r = await (await _d).query('recitations',
+        where: 'student_id = ? AND recitation_type = ? AND rating <> ?',
+        whereArgs: [sid, 'حفظ جديد', kNotRecited],
+        orderBy: 'recitation_date DESC, id DESC',
+        limit: 80);
+    final seen = <String>{};
+    final out = <M>[];
+    for (final x in r) {
+      final k = '${x['surah_name']}|${x['start_verse']}|${x['end_verse']}';
+      if (sv(x['surah_name']).isNotEmpty && seen.add(k)) out.add(x);
+    }
+    return out;
   }
 
   static Future<List<M>> recitationHistory(int id) async => (await _d).query(
